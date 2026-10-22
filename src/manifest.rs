@@ -48,6 +48,9 @@ pub fn parse_manifest(text: &str) -> CResult<Manifest> {
         .get("sha256")
         .and_then(|x| x.as_str())
         .map(|s| s.to_lowercase());
+    if let Some(url) = &package_url {
+        crate::platform::parse_url(url)?;
+    }
     if let Some(h) = &sha256 {
         if h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err((
@@ -99,10 +102,13 @@ pub fn parse_manifest(text: &str) -> CResult<Manifest> {
 pub fn check_result_json(current: &str, m: &Manifest) -> CResult<String> {
     let cur = parse_version(current)
         .map_err(|e| (ERR_INVALID_ARG, format!("current version invalid: {e}")))?;
-    let latest = parse_version(&m.version).unwrap(); // validated in parse_manifest
+    let latest = parse_version(&m.version).map_err(|e| (ERR_INVALID_ARG, e))?;
     let newer = compare_versions(&latest, &cur) == std::cmp::Ordering::Greater;
     let below_min = match &m.min_version {
-        Some(mv) => compare_versions(&cur, &parse_version(mv).unwrap()) == std::cmp::Ordering::Less,
+        Some(mv) => {
+            compare_versions(&cur, &parse_version(mv).map_err(|e| (ERR_INVALID_ARG, e))?)
+                == std::cmp::Ordering::Less
+        }
         None => false,
     };
     let complete = m.package_url.is_some() && m.sha256.is_some();
