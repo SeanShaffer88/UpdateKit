@@ -3,7 +3,7 @@
 //! Strict about structure, permissive about whitespace; errors carry a
 //! byte offset. Not a general JSON library: no serialization (the FFI
 //! builds result JSON with json_escape), no duplicate-key policy
-//! beyond last-wins.
+//! duplicate keys are rejected to avoid ambiguous security-sensitive fields.
 
 use std::collections::BTreeMap;
 
@@ -38,7 +38,7 @@ impl Value {
     }
     pub fn as_u64(&self) -> Option<u64> {
         match self {
-            Value::Num(n) if *n >= 0.0 && n.fract() == 0.0 && *n <= u64::MAX as f64 => {
+            Value::Num(n) if *n >= 0.0 && n.fract() == 0.0 && *n < u64::MAX as f64 => {
                 Some(*n as u64)
             }
             _ => None,
@@ -47,9 +47,13 @@ impl Value {
 }
 
 pub fn parse(input: &str) -> Result<Value, String> {
+    if input.len() > 1024 * 1024 {
+        return Err("JSON exceeds 1 MiB limit".into());
+    }
     let mut p = Parser {
         bytes: input.as_bytes(),
         pos: 0,
+        depth: 0,
     };
     p.skip_ws();
     let v = p.value()?;
@@ -63,6 +67,7 @@ pub fn parse(input: &str) -> Result<Value, String> {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -79,6 +84,16 @@ impl<'a> Parser<'a> {
     }
 
     fn value(&mut self) -> Result<Value, String> {
+        if self.depth >= 64 {
+            return Err("JSON nesting exceeds 64 levels".into());
+        }
+        self.depth += 1;
+        let result = self.value_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn value_inner(&mut self) -> Result<Value, String> {
         match self.peek() {
             Some(b'{') => self.object(),
             Some(b'[') => self.array(),
@@ -121,7 +136,9 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             self.skip_ws();
             let val = self.value()?;
-            map.insert(key, val);
+            if map.insert(key, val).is_some() {
+                return Err(format!("duplicate object key at byte {}", self.pos));
+            }
             self.skip_ws();
             match self.peek() {
                 Some(b',') => {
@@ -238,14 +255,46 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        while matches!(self.peek(), Some(c) if c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
-        {
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err("invalid JSON integer".into()),
+        }
+        if self.peek() == Some(b'.') {
             self.pos += 1;
+            let digits = self.pos;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            if digits == self.pos {
+                return Err("missing fractional digits".into());
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let digits = self.pos;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            if digits == self.pos {
+                return Err("missing exponent digits".into());
+            }
         }
         let s = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or("");
-        s.parse::<f64>()
-            .map(Value::Num)
-            .map_err(|_| format!("invalid number at byte {start}"))
+        let n = s
+            .parse::<f64>()
+            .map_err(|_| format!("invalid number at byte {start}"))?;
+        if !n.is_finite() {
+            return Err("non-finite JSON number".into());
+        }
+        Ok(Value::Num(n))
     }
 }
 

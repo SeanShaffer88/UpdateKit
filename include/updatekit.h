@@ -58,7 +58,7 @@ typedef int (*uk_progress_fn)(void *ctx, uint64_t downloaded, uint64_t total);
 
 /* Download url to dest_path, verifying expected_sha256 (64 hex chars)
  * when non-NULL. Returns UK_OK on success; partial/bad files are
- * removed on failure. */
+ * removed on failure when possible; cleanup failures are reported. Existing destinations are refused. */
 UK_API int uk_download(const char *url, const char *dest_path,
                        const char *expected_sha256,
                        uk_progress_fn progress, void *ctx);

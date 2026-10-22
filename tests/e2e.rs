@@ -147,6 +147,30 @@ fn full_update_pipeline() {
         ERR_CORRUPT
     );
 
+    // Existing files are refused before writes and preserved on both failure and success paths.
+    let rc = uk_download(
+        cs(&format!("{base}/pkg.bin")).as_ptr(),
+        cs(dest.to_str().unwrap()).as_ptr(),
+        cs(&pkg_hash).as_ptr(),
+        None,
+        std::ptr::null_mut(),
+    );
+    assert_ne!(rc, UK_OK);
+    assert_eq!(std::fs::read(&dest).unwrap(), PKG);
+    extern "C" fn cancel(_: *mut c_void, _: u64, _: u64) -> c_int {
+        1
+    }
+    let cancelled = dir.join("cancelled.bin");
+    let rc = uk_download(
+        cs(&format!("{base}/pkg.bin")).as_ptr(),
+        cs(cancelled.to_str().unwrap()).as_ptr(),
+        cs(&pkg_hash).as_ptr(),
+        Some(cancel),
+        std::ptr::null_mut(),
+    );
+    assert_ne!(rc, UK_OK);
+    assert!(!cancelled.exists());
+
     // 5. Download with a wrong expected hash → CORRUPT, file removed.
     let dest2 = dir.join("pkg2.bin");
     let rc = uk_download(

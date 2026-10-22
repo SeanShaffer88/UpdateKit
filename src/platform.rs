@@ -29,6 +29,12 @@ pub struct Url {
 }
 
 pub fn parse_url(url: &str) -> CResult<Url> {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) || url.contains(['\\', '#', '@']) {
+        return Err((
+            crate::ERR_INVALID_ARG,
+            "URL contains forbidden whitespace, credentials, fragment or backslash".into(),
+        ));
+    }
     let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
     } else if let Some(r) = url.strip_prefix("http://") {
@@ -39,7 +45,7 @@ pub fn parse_url(url: &str) -> CResult<Url> {
             format!("URL must start with http:// or https://: '{url}'"),
         ));
     };
-    let (authority, path) = match rest.find('/') {
+    let (authority, path) = match rest.find(['/', '?']) {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
@@ -61,11 +67,24 @@ pub fn parse_url(url: &str) -> CResult<Url> {
         }
         None => (authority.to_string(), if secure { 443 } else { 80 }),
     };
+    if port == 0 || host.contains(['?', ':']) {
+        return Err((crate::ERR_INVALID_ARG, "invalid URL authority".into()));
+    }
+    if !secure && !matches!(host.as_str(), "localhost" | "127.0.0.1") {
+        return Err((
+            crate::ERR_INVALID_ARG,
+            "remote update URLs require HTTPS; plain HTTP is limited to loopback tests".into(),
+        ));
+    }
     Ok(Url {
         secure,
         host,
         port,
-        path: path.to_string(),
+        path: if path.starts_with('?') {
+            format!("/{path}")
+        } else {
+            path.to_string()
+        },
     })
 }
 
@@ -240,14 +259,22 @@ mod win {
         }
         // Follow redirects (release downloads redirect to storage),
         // but never let an https URL downgrade to http.
-        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-        unsafe {
+        // Loopback HTTP is only for test fixtures and must never redirect remotely.
+        let policy: u32 = if u.secure {
+            WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
+        } else {
+            0
+        };
+        let configured = unsafe {
             WinHttpSetOption(
                 s.request,
                 WINHTTP_OPTION_REDIRECT_POLICY,
                 &policy as *const u32 as *const c_void,
                 4,
-            );
+            )
+        };
+        if configured == 0 {
+            return Err(last_err("WinHttpSetOption redirect policy"));
         }
         if unsafe { WinHttpSendRequest(s.request, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) }
             == 0
@@ -303,6 +330,7 @@ mod win {
         if avail == 0 {
             return Ok(None);
         }
+        let avail = avail.min(64 * 1024);
         let mut buf = vec![0u8; avail as usize];
         let mut got: u32 = 0;
         if unsafe { WinHttpReadData(req, buf.as_mut_ptr() as *mut c_void, avail, &mut got) } == 0 {
@@ -342,7 +370,10 @@ mod win {
     ) -> CResult<(u64, String)> {
         let (s, status, total) = open_get(url)?;
         check_status(status, url)?;
-        let mut file = std::fs::File::create(dest_path)
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest_path)
             .map_err(|e| (ERR_PLATFORM, format!("cannot create '{dest_path}': {e}")))?;
         let mut hasher = Sha256::new();
         let mut written: u64 = 0;
@@ -360,24 +391,36 @@ mod win {
         })();
         drop(file);
         if let Err(e) = result {
-            let _ = std::fs::remove_file(dest_path);
-            return Err(e);
+            return Err(cleanup_error(dest_path, e));
         }
         let digest = hex(&hasher.finalize());
         if let Some(expected) = expected_sha256 {
             if !digest.eq_ignore_ascii_case(expected) {
-                let _ = std::fs::remove_file(dest_path);
-                return Err((
-                    ERR_CORRUPT,
-                    format!(
-                        "SHA-256 mismatch for '{url}': expected {}, got {} — file deleted",
-                        expected.to_lowercase(),
-                        digest
+                return Err(cleanup_error(
+                    dest_path,
+                    (
+                        ERR_CORRUPT,
+                        format!(
+                            "SHA-256 mismatch for '{url}': expected {}, got {}",
+                            expected.to_lowercase(),
+                            digest
+                        ),
                     ),
                 ));
             }
         }
         Ok((written, digest))
+    }
+
+    fn cleanup_error(path: &str, mut error: (i32, String)) -> (i32, String) {
+        if let Err(cleanup) = std::fs::remove_file(path) {
+            if cleanup.kind() != std::io::ErrorKind::NotFound {
+                error.1.push_str(&format!(
+                    "; incomplete/unverified file could not be removed at '{path}': {cleanup}"
+                ));
+            }
+        }
+        error
     }
 }
 

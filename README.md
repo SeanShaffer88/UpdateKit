@@ -102,3 +102,7 @@ See `ROADMAP.md` for what's next.
 ## License
 
 MIT © 2026 Sean Shaffer.
+
+## Input review and reporting
+
+Read the [bounded input and safety contract](docs/INPUT_REVIEW.md), including intentional refusals and remaining validation gaps. Report sensitive issues through the [security policy](SECURITY.md).
